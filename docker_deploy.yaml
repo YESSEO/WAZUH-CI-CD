@@ -1,0 +1,175 @@
+
+
+
+# Add trivy scan
+# Build a worker.sh to build the CDI
+
+# Docker: Pacakge deployment
+- name: Install Docker on hosts
+  hosts: managers:workers
+  become: yes
+  tasks:
+    - name: Install dependencies
+      apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - software-properties-common
+        state: present
+        update_cache: yes
+
+    - name: Ensure /etc/apt/keyrings exists
+      file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: '0755'
+
+    - name: Download Docker GPG key
+      get_url:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        dest: /etc/apt/keyrings/docker.asc
+        mode: '0644'
+
+    - name: Add Docker repository
+      shell: |
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
+        $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}") stable" \
+        | tee /etc/apt/sources.list.d/docker.list > /dev/null
+      args:
+        executable: /bin/bash
+
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+
+    - name: Install Docker packages
+      apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: latest
+        update_cache: yes
+
+    - name: Enable and start Docker
+      systemd:
+        name: docker
+        enabled: yes
+        state: started
+
+# NFS: Server
+- name: Install and configure NFS server
+  hosts: data
+  become: yes
+  tasks:
+    - name: Install NFS server package
+      apt:
+        name: nfs-kernel-server
+        state: present
+        update_cache: yes
+
+    - name: Create export directory
+      file:
+        path: /mnt/swrmd_nfs/
+        state: directory
+        owner: nobody
+        group: nogroup
+        mode: '0777'
+
+    - name: Configure NFS exports
+      copy:
+        dest: /etc/exports
+        content: |
+          /mnt/swrmd_nfs {{ hostvars['ansi01'].ansible_host }}(rw,sync,no_subtree_check)
+          /mnt/swrmd_nfs {{ hostvars['ansi02'].ansible_host }}(rw,sync,no_subtree_check)
+
+    - name: Reload NFS exports
+      command: exportfs -r
+
+    - name: Ensure NFS server is running and enabled
+      systemd:
+        name: nfs-kernel-server
+        enabled: yes
+        state: started
+
+    - name: Copying Wazuh directory
+      ansible.builtin.copy:
+        src: ./wazuh-docker
+        dest: /mnt/swrmd_nfs/ 
+
+
+# NFS: Client
+- name: Mount NFS share on swarm nodes
+  hosts: managers,workers
+  become: yes
+  tasks:
+    - name: Install NFS client
+      apt:
+        name: nfs-common
+        state: present
+        update_cache: yes
+
+    - name: Create mount point
+      file:
+        path: /mnt/swrmd_nfs
+        state: directory
+
+    - name: Mount NFS share
+      mount:
+        src: "{{ hostvars[groups['data'][0]].ansible_host }}:/mnt/swrmd_nfs"
+        path: /mnt/swrmd_nfs
+        fstype: nfs
+        opts: rw,sync,hard,intr
+        state: mounted
+
+    - name: Ensure persistent mount
+      mount:
+        src: "{{ hostvars[groups['data'][0]].ansible_host }}:/mnt/swrmd_nfs"
+        path: /mnt/swrmd_nfs
+        fstype: nfs
+        opts: rw,sync,hard,intr
+        state: present
+
+
+- name: Initialize Docker Swarm
+  hosts: managers
+  become: yes
+  tasks:
+    - name: Initialize swarm on first manager
+      command: "docker swarm init --advertise-addr {{ ansible_host }}"
+      register: swarm_init
+      run_once: true
+      failed_when: swarm_init.rc not in [0,1]
+
+    - name: Retrieve manager join token
+      command: "docker swarm join-token manager -q"
+      register: manager_token
+      run_once: true
+
+    - name: Retrieve worker join token
+      command: "docker swarm join-token worker -q"
+      register: worker_token
+      run_once: true
+
+    - name: Set manager join command as a fact
+      set_fact:
+        manager_join_command: "docker swarm join --token {{ manager_token.stdout }} {{ ansible_host }}:2377"
+      
+
+    - name: Set worker join command as a fact
+      set_fact:
+        worker_join_command: "docker swarm join --token {{ worker_token.stdout }} {{ ansible_host }}:2377"
+      
+
+- name: Join workers to Swarm
+  hosts: workers
+  become: yes
+  tasks:
+    - name: Join swarm as worker
+      shell: "{{ hostvars[groups['managers'][0]].worker_join_command }}"
+      register: swarm_join
+      failed_when: swarm_join.rc != 0 and
+               "'This node is already part of a swarm' not in swarm_join.stderr"
