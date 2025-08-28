@@ -1,0 +1,20 @@
+vrrp_instance VI_1 {
+  state BACKUP
+  interface ens33
+  virtual_router_id 51
+  priority 110
+  advert_int 1
+  authentication {
+    auth_type PASS
+    auth_pass PM<lG[71Ar{4
+  }
+  unicast_peer {
+{% for host in groups['managers'] %}
+    {{ hostvars[host].ansible_host }}
+{% endfor %}
+  }
+  virtual_ipaddress {
+    10.1.149.133
+  }
+}
+
