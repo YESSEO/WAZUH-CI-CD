@@ -1,8 +1,59 @@
+# KeepAlived: Master
+- hosts: managers:workers
+  become: true
+  tasks:
+    - name: Install keepalived on managers and workers
+      package:
+        name: keepalived
+        state: present
+
+    - name: Ensure keepalived service is enabled and started
+      service:
+        name: keepalived
+        enabled: true
+        state: started
+
+- hosts: managers
+  become: true
+  tasks:
+    - name: Deploy keepalived.conf for MASTER node(s)
+      template:
+        src: ./templates/keepalive/keepalived_master.conf.j2
+        dest: /etc/keepalived/keepalived.conf
+        owner: root
+        group: root
+        mode: '0644'
+      notify:
+        - restart keepalived
+
+- hosts: workers
+  become: true
+  tasks:
+    - name: Deploy keepalived.conf for BACKUP node(s)
+      template:
+        src: ./templates/keepalive/keepalived_backup.conf.j2
+        dest: /etc/keepalived/keepalived.conf
+        owner: root
+        group: root
+        mode: '0644'
+      notify:
+        - restart keepalived
+
+- hosts: managers:workers
+  become: true
+  tasks:
+    - name: Trigger keepalived restart
+      ansible.builtin.debug:
+        msg: "Restarting keepalived..."
+      notify:
+        - restart keepalived
+  handlers:
+    - name: restart keepalived
+      service:
+        name: keepalived
+        state: restarted
 
 
-
-# Add trivy scan
-# Build a worker.sh to build the CDI
 
 # Docker: Pacakge deployment
 - name: Install Docker on hosts
@@ -82,10 +133,10 @@
     - name: Configure NFS exports
       copy:
         dest: /etc/exports
+        # Map the client root -> Server, so we dont use no_root_squash
         content: |
-          /mnt/swrmd_nfs {{ hostvars['ansi01'].ansible_host }}(rw,sync,no_subtree_check)
-          /mnt/swrmd_nfs {{ hostvars['ansi02'].ansible_host }}(rw,sync,no_subtree_check)
-
+           /mnt/swrmd_nfs {{ hostvars['ansi01'].ansible_host }}(rw,sync,no_subtree_check,anonuid=0,anongid=0)
+           /mnt/swrmd_nfs {{ hostvars['ansi02'].ansible_host }}(rw,sync,no_subtree_check,anonuid=0,anongid=0)
     - name: Reload NFS exports
       command: exportfs -r
 
